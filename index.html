@@ -80,6 +80,7 @@
   <div class="tabs">
     <button data-tab="all" class="on">All</button>
     <button data-tab="drops">Price drops</button>
+    <button data-tab="deals">Good value</button>
     <button data-tab="new">New (7d)</button>
     <button data-tab="favs">★ Saved</button>
   </div>
@@ -101,7 +102,9 @@ const fmt$ = n => n == null ? '—' : '$' + n.toLocaleString();
 const daysAgo = iso => Math.round((Date.now() - new Date(iso + 'T12:00')) / 86400000);
 
 async function load() {
-  const res = await fetch('data/listings.json');
+  // no-cache: revalidate with the server so daily updates appear without
+  // a hard refresh (Pages otherwise lets browsers reuse the file for 10min)
+  const res = await fetch('data/listings.json', { cache: 'no-cache' });
   DATA = await res.json();
   $('updated').textContent = `Updated ${DATA.updated} · data via Redfin`;
   const cities = [...new Set(DATA.listings.map(l => l.city).filter(Boolean))].sort();
@@ -127,6 +130,7 @@ function filtered() {
     (l.beds || 0) >= beds && (l.baths || 0) >= baths
   );
   if (TAB === 'drops') rows = rows.filter(l => l.price_drop > 0);
+  if (TAB === 'deals') rows = rows.filter(l => l.ask_vs_assessed_pct != null && l.ask_vs_assessed_pct <= 95);
   if (TAB === 'new') rows = rows.filter(isNewListing);
   if (TAB === 'favs') rows = rows.filter(l => favs.has(l.property_id));
   const sort = $('f-sort').value;
