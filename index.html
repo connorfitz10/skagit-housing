@@ -38,6 +38,7 @@
   .badges { padding: 0 14px; display: flex; gap: 6px; flex-wrap: wrap; min-height: 22px; margin-top: 4px; }
   .badge { font-size: .7rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
   .badge.drop { background: var(--drop-bg); color: var(--drop); }
+  .badge.deal { background: #fef3c7; color: #b45309; }
   .badge.new { background: var(--new-bg); color: var(--new-ink); }
   .badge.type { background: var(--accent-light); color: var(--accent); }
   .badge.status { background: #f3f4f6; color: var(--muted); }
@@ -74,6 +75,7 @@
     <option value="price-desc">Price ↓</option>
     <option value="drop-desc">Biggest price drop</option>
     <option value="psf-asc">$/sqft ↑</option>
+    <option value="ava-asc">Ask vs assessed ↑</option>
   </select></div>
   <div class="tabs">
     <button data-tab="all" class="on">All</button>
@@ -134,6 +136,7 @@ function filtered() {
     'price-desc':(a, b) => (b.price ?? 0) - (a.price ?? 0),
     'drop-desc': (a, b) => b.price_drop_pct - a.price_drop_pct,
     'psf-asc':   (a, b) => (a.price_per_sqft ?? 9e9) - (b.price_per_sqft ?? 9e9),
+    'ava-asc':   (a, b) => (a.ask_vs_assessed_pct ?? 9e9) - (b.ask_vs_assessed_pct ?? 9e9),
   }[sort];
   return rows.sort(cmp);
 }
@@ -181,6 +184,7 @@ function card(l) {
     </div>
     <div class="badges">
       ${l.price_drop > 0 ? `<span class="badge drop">▼ ${fmt$(l.price_drop)}</span>` : ''}
+      ${l.ask_vs_assessed_pct != null && l.ask_vs_assessed_pct <= 95 ? `<span class="badge deal">${l.ask_vs_assessed_pct}% of assessed</span>` : ''}
       ${isNew ? '<span class="badge new">NEW</span>' : ''}
       <span class="badge type">${l.property_type_label}</span>
       ${l.mls_status && l.mls_status !== 'Active' ? `<span class="badge status">${esc(l.mls_status)}</span>` : ''}
@@ -199,6 +203,10 @@ function card(l) {
         <span><b>${l.dom ?? '—'}</b> days on mkt</span>
         ${l.hoa_month ? `<span>HOA <b>$${l.hoa_month}</b>/mo</span>` : ''}
       </div>
+      ${l.assessed_value ? `<div class="facts">
+        <span>Assessed <b>${fmt$(l.assessed_value)}</b>${l.ask_vs_assessed_pct != null ? ` (ask = ${l.ask_vs_assessed_pct}%)` : ''}</span>
+        ${l.annual_taxes ? `<span>Taxes <b>$${Math.round(l.annual_taxes).toLocaleString()}</b>/yr</span>` : ''}
+      </div>` : ''}
       ${hist}
     </div>
     <a class="view" href="${l.url}" target="_blank" rel="noopener">View on Redfin →</a>

@@ -12,9 +12,13 @@ Outputs:
 
 import gzip
 import json
+import re
 import sqlite3
 import sys
-from datetime import date
+import time
+import urllib.parse
+import urllib.request
+from datetime import date, timedelta
 from pathlib import Path
 
 from curl_cffi import requests
@@ -26,6 +30,13 @@ API_URL = "https://www.redfin.com/stingray/api/gis"
 # The API ignores page_number but honors large num_homes values, so we
 # grab everything in one request. County has ~750-800 active listings.
 NUM_HOMES = 2000
+
+# Skagit County's public tax-parcel GIS layer (official open data).
+# Each listing's lat/lng is matched to its parcel for assessed value + taxes.
+ASSESSOR_URL = ("https://geo.skagitcountywa.gov/server/rest/services/"
+                "PortalServiceLayers/Tax_Parcels/MapServer/0/query")
+ASSESSOR_REFRESH_DAYS = 120   # assessed values only change ~annually
+ASSESSOR_DELAY_S = 0.15      # politeness delay between parcel queries
 
 DATA_DIR = Path(__file__).parent / "data"
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
@@ -142,6 +153,12 @@ def init_db(conn):
             PRIMARY KEY (property_id, date)
         );
     """)
+    # Assessor columns added after initial schema; migrate older databases.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(listings)")}
+    for name, sqltype in [("parcel_id", "TEXT"), ("assessed_value", "INTEGER"),
+                          ("annual_taxes", "REAL"), ("assessor_checked", "TEXT")]:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE listings ADD COLUMN {name} {sqltype}")
 
 
 def upsert(conn, rows, today):
@@ -195,6 +212,80 @@ def upsert(conn, rows, today):
     return new_count, drop_count
 
 
+def _num(s):
+    """Assessor attributes arrive as strings like '2065400' or '18669.82'."""
+    try:
+        f = float(s)
+        return f if f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def query_parcel(lat, lng):
+    params = urllib.parse.urlencode({
+        "f": "json",
+        "geometry": json.dumps({"x": lng, "y": lat,
+                                "spatialReference": {"wkid": 4326}}),
+        "geometryType": "esriGeometryPoint",
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "PARCELID,AssessedValue,TotalTaxes",
+        "returnGeometry": "false",
+    })
+    with urllib.request.urlopen(f"{ASSESSOR_URL}?{params}", timeout=30) as r:
+        feats = json.loads(r.read()).get("features", [])
+    if not feats:
+        return None
+    return feats[0]["attributes"]
+
+
+def enrich_assessor(conn, today):
+    """Attach county assessed value + annual taxes to listings that lack
+    them (or whose data is stale). Cached in SQLite, so after the first
+    run only newly listed homes trigger parcel queries."""
+    stale = (date.fromisoformat(today) - timedelta(days=ASSESSOR_REFRESH_DAYS)).isoformat()
+    todo = conn.execute(
+        """SELECT property_id, lat, lng FROM listings
+           WHERE active = 1 AND lat IS NOT NULL
+             AND (assessor_checked IS NULL OR assessor_checked < ?)""",
+        (stale,),
+    ).fetchall()
+    if not todo:
+        return 0, 0
+    print(f"Querying Skagit County assessor for {len(todo)} listings...")
+    ok = failed = 0
+    for i, row in enumerate(todo, 1):
+        try:
+            attrs = query_parcel(row["lat"], row["lng"])
+        except Exception:
+            failed += 1
+            continue  # leave unchecked; retried next run
+        if attrs:
+            conn.execute(
+                """UPDATE listings SET parcel_id=?, assessed_value=?,
+                   annual_taxes=?, assessor_checked=? WHERE property_id=?""",
+                (attrs.get("PARCELID"), _num(attrs.get("AssessedValue")),
+                 _num(attrs.get("TotalTaxes")), today, row["property_id"]),
+            )
+            ok += 1
+        else:
+            # no parcel at that point (bad geocode); don't retry daily
+            conn.execute(
+                "UPDATE listings SET assessor_checked=? WHERE property_id=?",
+                (today, row["property_id"]),
+            )
+        if i % 100 == 0:
+            print(f"  {i}/{len(todo)} done")
+            conn.commit()
+        time.sleep(ASSESSOR_DELAY_S)
+    conn.commit()
+    if failed:
+        print(f"  {failed} parcel queries failed (will retry next run)")
+    return ok, failed
+
+
+UNIT_ADDRESS_RE = re.compile(r"#|\bunit\b|\bspc\b|\bspace\b|\btrlr\b|\bapt\b", re.I)
+
+
 def export_json(conn, today):
     listings = []
     for row in conn.execute("SELECT * FROM listings WHERE active = 1"):
@@ -214,6 +305,21 @@ def export_json(conn, today):
         else:
             d["price_drop"] = 0
             d["price_drop_pct"] = 0
+        # Unit-numbered listings (mobile-home parks, some condos) geocode
+        # onto a shared parent parcel whose assessed value covers the whole
+        # complex — comparing against it is meaningless, so drop it. The
+        # <20% ratio check catches shared parcels with unmarked addresses.
+        suspect = bool(d["address"] and UNIT_ADDRESS_RE.search(d["address"]))
+        if not suspect and d["price"] and d["assessed_value"]:
+            if 100 * d["price"] / d["assessed_value"] < 20:
+                suspect = True
+        if suspect:
+            d["assessed_value"] = None
+            d["annual_taxes"] = None
+        if d["price"] and d["assessed_value"]:
+            d["ask_vs_assessed_pct"] = round(100 * d["price"] / d["assessed_value"])
+        else:
+            d["ask_vs_assessed_pct"] = None
         listings.append(d)
 
     out = {
@@ -267,6 +373,8 @@ def main():
         )
         delisted = cur.rowcount
     conn.commit()
+
+    enrich_assessor(conn, today)
 
     exported = export_json(conn, today)
     conn.close()

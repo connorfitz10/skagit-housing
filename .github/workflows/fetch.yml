@@ -1,8 +1,10 @@
 name: Daily listing fetch
 
+# NOTE: Redfin blocks requests from GitHub-hosted runners (HTTP 405), so
+# this cannot run on a schedule here. The daily fetch runs on Connor's PC
+# via Windows Task Scheduler and pushes data; this workflow remains for
+# manual re-testing in case Redfin's blocking ever changes.
 on:
-  schedule:
-    - cron: "0 15 * * *"   # 7am PST / 8am PDT daily
   workflow_dispatch: {}
 
 permissions:
